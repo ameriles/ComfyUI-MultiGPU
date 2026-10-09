@@ -1,6 +1,6 @@
 import folder_paths
 from pathlib import Path
-from nodes import NODE_CLASS_MAPPINGS
+from nodes import LoraLoader, NODE_CLASS_MAPPINGS
 from .device_utils import get_device_list
 
 class DeviceSelectorMultiGPU:
@@ -18,6 +18,58 @@ class DeviceSelectorMultiGPU:
     def select_device(self, device):
         """Return the selected device label without side effects."""
         return (device,)
+
+
+class LoraLoaderModelOnlyMultiGPU(LoraLoader):
+    """Load a model-only LoRA and choose how DisTorch2 materializes it."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "lora_name": (folder_paths.get_filename_list("loras"),),
+                "strength_model": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": -100.0,
+                        "max": 100.0,
+                        "step": 0.01,
+                        "tooltip": "How strongly to apply the LoRA to the diffusion model.",
+                    },
+                ),
+                "patch_mode": (
+                    ["standard_safe", "target_device_low_ram"],
+                    {
+                        "default": "standard_safe",
+                        "tooltip": (
+                            "target_device_low_ram patches each layer on its final DisTorch2 device "
+                            "without retaining full weight backups. Reload the base transformer before "
+                            "changing the LoRA or its strength."
+                        ),
+                    },
+                ),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    RETURN_NAMES = ("model",)
+    FUNCTION = "load_lora_model_only_multigpu"
+    CATEGORY = "multigpu/loaders"
+    TITLE = "Load LoRA Model Only (MultiGPU)"
+    DESCRIPTION = (
+        "Loads a model-only LoRA. The optional low-RAM mode lets DisTorch2 patch each layer "
+        "directly on its assigned device without keeping full weight backups."
+    )
+
+    def load_lora_model_only_multigpu(self, model, lora_name, strength_model, patch_mode):
+        model_lora = self.load_lora(model, None, lora_name, strength_model, 0)[0]
+        model_lora._distorch_lora_patch_mode = patch_mode
+        model_lora._distorch_lora_name = lora_name
+        model_lora._distorch_lora_strength = strength_model
+        return (model_lora,)
+
 
 class UnetLoaderGGUF:
     @classmethod

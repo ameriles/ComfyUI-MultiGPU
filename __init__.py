@@ -594,6 +594,7 @@ _initialize_aimdo_visible_cuda_devices()
 
 from .nodes import (
     DeviceSelectorMultiGPU,
+    LoraLoaderModelOnlyMultiGPU,
     UnetLoaderGGUF,
     UnetLoaderGGUFAdvanced,
     CLIPLoaderGGUF,
@@ -690,7 +691,12 @@ NODE_CLASS_MAPPINGS = {
     "CheckpointLoaderAdvancedMultiGPU": CheckpointLoaderAdvancedMultiGPU,
     "CheckpointLoaderAdvancedDisTorch2MultiGPU": CheckpointLoaderAdvancedDisTorch2MultiGPU,
     "DeviceSelectorMultiGPU": DeviceSelectorMultiGPU,
+    "LoraLoaderModelOnlyMultiGPU": LoraLoaderModelOnlyMultiGPU,
     "UNetLoaderLP": UNetLoaderLP,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "LoraLoaderModelOnlyMultiGPU": "Load LoRA Model Only (MultiGPU)",
 }
 
 NODE_CLASS_MAPPINGS["UNETLoaderMultiGPU"] = override_class(GLOBAL_NODE_CLASS_MAPPINGS["UNETLoader"])

@@ -11,6 +11,7 @@ from collections import defaultdict
 logger = logging.getLogger("MultiGPU")
 import comfy.model_management as mm
 import comfy.model_patcher
+import comfy.utils
 from .device_utils import get_device_list
 from .model_management_mgpu import multigpu_memory_log
 
@@ -23,6 +24,33 @@ def unpack_load_item(item):
         return item[1], item[2], item[3], item[4]
     # (module_mem, module_name, module_object, params)
     return item[0], item[1], item[2], item[3]
+
+
+def _patch_weight_on_target_without_backup(patcher, key, target_device):
+    """Materialize one patched weight on its final device without a base-weight backup."""
+    patched_weight = patcher.patch_weight_to_device(
+        key,
+        device_to=target_device,
+        return_weight=True,
+    )
+    if patched_weight is None:
+        raise RuntimeError(f"DisTorch2 low-RAM LoRA patch returned no weight for {key}")
+
+    previous_weight = comfy.utils.set_attr_param(patcher.model, key, patched_weight)
+    del previous_weight
+    del patched_weight
+
+
+def _release_lora_patch_cache(target_device):
+    """Release completed LoRA patch temporaries without affecting non-CUDA targets."""
+    target_name = str(target_device)
+    if not target_name.startswith("cuda:"):
+        return
+
+    target_index = int(target_name.split(":", 1)[1])
+    torch.cuda.synchronize(target_index)
+    with torch.cuda.device(target_index):
+        torch.cuda.empty_cache()
 
 
 
@@ -223,6 +251,8 @@ def register_patched_safetensor_modelpatcher():
                 return result
 
             allocations = inner_model._distorch_v2_meta['full_allocation']
+            lora_patch_mode = getattr(self, "_distorch_lora_patch_mode", "standard_safe")
+            direct_lora_patch = len(self.patches) > 0 and lora_patch_mode == "target_device_low_ram"
 
             if not hasattr(self.model, '_distorch_high_precision_loras'):
                 self.model._distorch_high_precision_loras = True
@@ -231,6 +261,13 @@ def register_patched_safetensor_modelpatcher():
                 self.model.current_weight_patches_uuid = None
 
             unpatch_weights = self.model.current_weight_patches_uuid is not None and (self.model.current_weight_patches_uuid != self.patches_uuid or force_patch_weights)
+
+            if direct_lora_patch and unpatch_weights:
+                raise RuntimeError(
+                    "The low-RAM MultiGPU LoRA is already materialized and cannot be safely "
+                    "unpatched without full weight backups. Reload the base transformer before "
+                    "changing the LoRA, its strength, or forcing weight patches."
+                )
 
             if unpatch_weights:
                 logger.debug("[MultiGPU DisTorch V2] Patches changed or forced. Unpatching model.")
@@ -256,13 +293,19 @@ def register_patched_safetensor_modelpatcher():
 
             model_original_dtype = comfy.utils.weight_dtype(self.model.state_dict())
             high_precision_loras = getattr(self.model, "_distorch_high_precision_loras", True)
+            direct_patch_counts = defaultdict(int)
+            if direct_lora_patch:
+                logger.info(
+                    "[LoRA MultiGPU] Applying patches directly on final DisTorch2 devices "
+                    f"(patch_keys={len(self.patches)}, weight_backups=disabled)"
+                )
             # Use standard ComfyUI load list - the device comparison fix ensures we don't crash
             loading = self._load_list()
             loading.sort(reverse=True)
             for item in loading:
                 module_size, module_name, module_object, params = unpack_load_item(item)
+                block_target_device = device_assignments['block_assignments'].get(module_name, device_to)
                 if not unpatch_weights and hasattr(module_object, "comfy_patched_weights") and module_object.comfy_patched_weights is True:
-                    block_target_device = device_assignments['block_assignments'].get(module_name, device_to)
                     current_module_device = None
                     try:
                         if any(p.numel() > 0 for p in module_object.parameters(recurse=False)):
@@ -278,24 +321,30 @@ def register_patched_safetensor_modelpatcher():
                     continue
 
                 # Step 1: Write block/tensor to compute device first
-                module_object.to(device_to)
+                patch_device = block_target_device if direct_lora_patch else device_to
+                module_object.to(patch_device)
 
                 # Step 2: Apply LoRa patches while on compute device
                 weight_key = f"{module_name}.weight"
                 bias_key = f"{module_name}.bias"
 
                 if weight_key in self.patches:
-                    self.patch_weight_to_device(weight_key, device_to=device_to)
+                    if direct_lora_patch:
+                        _patch_weight_on_target_without_backup(self, weight_key, patch_device)
+                    else:
+                        self.patch_weight_to_device(weight_key, device_to=device_to)
                 if weight_key in self.weight_wrapper_patches:
                     module_object.weight_function.extend(self.weight_wrapper_patches[weight_key])
 
                 if bias_key in self.patches:
-                    self.patch_weight_to_device(bias_key, device_to=device_to)
+                    if direct_lora_patch:
+                        _patch_weight_on_target_without_backup(self, bias_key, patch_device)
+                    else:
+                        self.patch_weight_to_device(bias_key, device_to=device_to)
                 if bias_key in self.weight_wrapper_patches:
                     module_object.bias_function.extend(self.weight_wrapper_patches[bias_key])
 
                 # Step 3: FP8 casting for CPU storage (if enabled)
-                block_target_device = device_assignments['block_assignments'].get(module_name, device_to)
                 has_patches = weight_key in self.patches or bias_key in self.patches
 
                 if not high_precision_loras and block_target_device == "cpu" and has_patches and model_original_dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
@@ -308,16 +357,30 @@ def register_patched_safetensor_modelpatcher():
                             logger.debug(f"[MultiGPU DisTorch V2] Cast {module_name}.{param_name} to FP8 for CPU storage")
 
                 # Step 4: Move to ultimate destination based on DisTorch assignment
-                if str(block_target_device) != str(device_to):
+                if not direct_lora_patch and str(block_target_device) != str(device_to):
                     logger.debug(f"[MultiGPU DisTorch V2] Moving {module_name} from {device_to} to {block_target_device}")
                     module_object.to(block_target_device)
                     module_object.comfy_cast_weights = True
+
+                if direct_lora_patch and has_patches:
+                    target_name = str(block_target_device)
+                    direct_patch_counts[target_name] += 1
+                    if direct_patch_counts[target_name] % 64 == 0:
+                        _release_lora_patch_cache(block_target_device)
 
                 # Mark as patched and update memory counter
                 module_object.comfy_patched_weights = True
                 mem_counter += module_size
 
             self.model.current_weight_patches_uuid = self.patches_uuid
+
+            if direct_lora_patch:
+                for target_name in direct_patch_counts:
+                    _release_lora_patch_cache(target_name)
+                logger.info(
+                    "[LoRA MultiGPU] Materialization complete "
+                    f"(patched_modules={dict(direct_patch_counts)}, weight_backups={len(self.backup)})"
+                )
 
             self.model.device = device_to
 

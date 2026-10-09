@@ -77,6 +77,7 @@ The extension automatically creates MultiGPU versions of loader nodes. Each Mult
 Currently supported nodes (automatically detected if available):
 
 - Standard [ComfyUI](https://github.com/comfyanonymous/ComfyUI) model loaders:
+  - [Load LoRA Model Only (MultiGPU)](web/docs/LoraLoaderModelOnlyMultiGPU.md)
   - [CheckpointLoaderAdvancedMultiGPU](web/docs/CheckpointLoaderAdvancedMultiGPU.md) / [CheckpointLoaderAdvancedDisTorch2MultiGPU](web/docs/CheckpointLoaderAdvancedDisTorch2MultiGPU.md)
   - [CheckpointLoaderSimpleMultiGPU](web/docs/CheckpointLoaderSimpleMultiGPU.md) / [CheckpointLoaderSimpleDisTorch2MultiGPU](web/docs/CheckpointLoaderSimpleDisTorch2MultiGPU.md)
   - [UNETLoaderMultiGPU](web/docs/UNETLoaderMultiGPU.md) / [UNETLoaderDisTorch2MultiGPU](web/docs/UNETLoaderDisTorch2MultiGPU.md)
